@@ -28,7 +28,7 @@ P_mean = np.mean(P, axis=1)
 P_std = np.std(P, axis=1)
 
 np.savez(
-    '20.npz',
+    'data/20.npz',
     delta_t=0.001 * step,
     num_samples=num_samples,
     phase=P_mean,
@@ -36,7 +36,7 @@ np.savez(
 
 # PLOT
 
-if True:
+if False:
     fig = plot.figure(figsize=(16, 8))
 
     x = np.arange(num_subcarriers)
