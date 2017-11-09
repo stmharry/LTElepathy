@@ -7,16 +7,39 @@ import scipy.ndimage
 
 from util import World, Particles
 
-with np.load('data/gen.npz') as data:
-    delta_t = data['delta_t']
-    num_samples = data['num_samples']
-    phase = data['phase']
 
+name = '10cm-1-1port-25PRB'
+
+num_samples = 600
+num_ports = 1
+num_subcarriers = 25 * 12
+
+step_samples = 10
+step_subcarriers = 60
+
+delta_t = 1e-2 * step_samples
+wave_freq = 915e6 + 15e3 * (np.arange(0, num_subcarriers, step_subcarriers) - num_subcarriers / 2)
+sep_length = 0.19
+
+P = np.fromfile(
+    '/home/stmharry/Library/srsLTE/build/signal-kinetics/log/{:s}'.format(name),
+    dtype=np.float32,
+)
+P = P[:num_samples * num_ports * num_subcarriers]
+P = np.reshape(P, (num_samples, num_ports, num_subcarriers))
+
+P = P[
+    slice(0, num_samples, step_samples),
+    0,
+    slice(0, num_subcarriers, step_subcarriers),
+]
+
+#
 
 world = World(
     delta_t=delta_t,
-    wave_freq=900e6,
-    sep_length=0.19,
+    wave_freq=wave_freq,
+    sep_length=sep_length,
 )
 
 host = Particles(
@@ -30,12 +53,12 @@ particles = Particles(
     communism_ratio=0.30,
     r=host.r,
     r_std=5.0,
-    v=(0.2, 0.0),
-    v_std=0.1,
+    v=(0.0, 0.0),
+    v_std=0.5,
 )
 
 
-map_size = 4.0
+map_size = 5.0
 num_bins = 512
 power = 0.3
 local_size = 1.0
@@ -63,7 +86,7 @@ ax.set_ylabel('y (m)')
 ax = fig.add_subplot(1, 2, 2)
 (phase_line,) = ax.plot([], [], 'b')
 
-ax.set_xlim(0, num_samples * delta_t)
+ax.set_xlim(0, num_samples / step_samples * delta_t)
 ax.set_ylim(-np.pi, np.pi)
 
 ax.set_xlabel('Time (s)')
@@ -72,20 +95,20 @@ ax.set_ylabel('Phase (radian)')
 plot.show(block=False)
 fig.canvas.draw()
 
-for num_sample in range(num_samples):
-    print('Time={:.4f} s'.format(num_sample * delta_t))
+for n in range(num_samples / step_samples):
+    print('Time={:.4f} s'.format(n * delta_t))
 
     particles.predict(
         host=host,
         r_std=None,
-        v=(0.2, 0.0),
+        v=(0.1, 0.0),
         v_std=0.05,
     )
     particles.update(
         host=host,
-        phase=phase[num_sample],
-        phase_spread=0.25,
-        r_spread=5.0,
+        phase=P[n],
+        phase_spread=0.5,
+        r_spread=10.0,
     )
     particles.resample()
 
@@ -99,7 +122,9 @@ for num_sample in range(num_samples):
     img.set_data(np.power(hist.T, power))
     img.autoscale()
 
-    phase_line.set_data(np.arange(num_sample) * delta_t, phase[:num_sample])
+    phase_line.set_data(np.arange(n) * delta_t, P[:n, 0])
 
     fig.canvas.draw()
     fig.canvas.flush_events()
+
+plot.show(block=True)

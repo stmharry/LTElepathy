@@ -87,9 +87,12 @@ class Particles(object):
             self.r = self.normal(r, r_std)
 
         # measurement: no noise
-        self.phase = self.world.wave_number * (
-            np.linalg.norm((self.r - host.r) + self.world.sep_length / 2 * self.dr, axis=1) -
-            np.linalg.norm((self.r - host.r) - self.world.sep_length / 2 * self.dr, axis=1)
+        # phase.shape = (num_particles, num_subcarriers)
+        self.phase = np.outer((
+                np.linalg.norm((self.r - host.r) + self.world.sep_length / 2 * self.dr, axis=1) -
+                np.linalg.norm((self.r - host.r) - self.world.sep_length / 2 * self.dr, axis=1)
+            ),
+            self.world.wave_number,
         )
 
     def update(self,
@@ -98,10 +101,8 @@ class Particles(object):
                phase_spread,
                r_spread):
 
-        deviation = np.stack([
-            # - 1 / 2 * np.square((np.remainder(self.phase - phase + np.pi, 2 * np.pi) - np.pi) / phase_std),
-            np.cos(self.phase - phase) / np.square(phase_spread),
-        ], axis=1)
+        # phase.shape = (num_subcarriers,)
+        deviation = np.cos(self.phase - phase) / np.square(phase_spread)
         logit = np.sum(deviation, axis=1)
 
         condition = np.stack([
