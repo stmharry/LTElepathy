@@ -31,11 +31,33 @@ class Particles(object):
 
             return np.random.normal(mean, std, (self.num_particles, d))
 
+    def uniform(self):
+        return np.ones((self.num_particles, 1)) / self.num_particles
+
+    def smooth(self, prob):
+        return (prob * (1 - self.smooth_ratio) + self.uniform() * self.smooth_ratio)
+
+    def normalize(self, prob, mask=None):
+        if mask is not None:
+            prob = prob * mask
+        prob = prob / np.sum(prob, axis=0, keepdims=True)
+        return prob
+
+    def softmax(self, logit, mask=None):
+        prob = np.exp(logit - np.max(logit, axis=0, keepdims=True))
+        prob = self.normalize(prob, mask=mask)
+        return prob
+
+    def entropy(self, prob, epsilon=1e-9):
+        prob = self.normalize(prob + epsilon)
+        entropy = - np.sum(prob * np.log(prob), axis=0)
+        return entropy
+
     def __init__(self,
                  world,
                  num_particles=1,
                  resample_ratio=1.0,
-                 communism_ratio=0.25,
+                 smooth_ratio=0.25,
                  r=None,
                  r_std=None,
                  v=None,
@@ -46,7 +68,7 @@ class Particles(object):
         self.world = world
         self.num_particles = num_particles
         self.resample_ratio = resample_ratio
-        self.communism_ratio = communism_ratio
+        self.smooth_ratio = smooth_ratio
 
         if a is None:
             self.a = None
@@ -64,6 +86,7 @@ class Particles(object):
             self.r = self.normal(r, r_std)
 
         self.dr = np.array([1, 0])  # TODO
+        self.likelihood = np.ones((num_particles, 1)) / num_particles
 
     def predict(self,
                 host,
@@ -87,7 +110,6 @@ class Particles(object):
             self.r = self.normal(r, r_std)
 
         # measurement: no noise
-        # phase.shape = (num_particles, num_subcarriers)
         self.phase = np.outer((
                 np.linalg.norm((self.r - host.r) + self.world.sep_length / 2 * self.dr, axis=1) -
                 np.linalg.norm((self.r - host.r) - self.world.sep_length / 2 * self.dr, axis=1)
@@ -101,23 +123,23 @@ class Particles(object):
                phase_spread,
                r_spread):
 
-        # phase.shape = (num_subcarriers,)
-        deviation = np.cos(self.phase - phase) / np.square(phase_spread)
-        logit = np.sum(deviation, axis=1)
+        logit = np.cos(self.phase - phase) / np.square(phase_spread)
+        mask = (np.linalg.norm(self.r - host.r, axis=1, keepdims=True) / r_spread) < 1
 
-        condition = np.stack([
-            (np.linalg.norm(self.r - host.r, axis=1) / r_spread) < 1,
-        ], axis=1)
-        filter_ = np.prod(condition, axis=1)
+        # '''
+        likelihood = self.softmax(logit, mask=mask * self.likelihood)
+        likelihood = self.normalize(self.smooth(likelihood) * mask)
+        select = self.entropy(self.likelihood) < self.entropy(likelihood)
 
-        self.likelihood = np.exp(logit - np.max(logit)) * filter_
-        self.likelihood /= np.sum(self.likelihood)
+        if np.any(select):
+            logit = logit[:, select]
+            print('Eliminated {:d} features'.format(np.sum(np.logical_not(select))))
+        # '''
 
-        self.likelihood = (
-            self.likelihood * (1 - self.communism_ratio) +
-            np.ones(self.num_particles) / self.num_particles * self.communism_ratio
-        ) * filter_
-        self.likelihood /= np.sum(self.likelihood)
+        logit = np.sum(logit, axis=1, keepdims=True)
+
+        self.likelihood = self.softmax(logit, mask=mask)
+        self.likelihood = self.normalize(self.smooth(self.likelihood) * mask)
 
     def measure(self,
                 r_std=None,
@@ -165,7 +187,7 @@ class Particles(object):
             indices = np.random.choice(
                 self.num_particles,
                 size=self.num_particles,
-                p=self.likelihood,
+                p=self.likelihood[:, 0],
             )
 
             if self.a is not None:

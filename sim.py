@@ -1,28 +1,34 @@
 import matplotlib
 matplotlib.use('qt4agg')
+matplotlib.rc('text', usetex=True)
+matplotlib.rc('font',
+    family='serif',
+    size=16,
+)
 
 import matplotlib.pyplot as plot
+
 import numpy as np
 import scipy.ndimage
 
 from util import World, Particles
 
-
-name = '10cm-1-1port-25PRB'
+name = 'log-915/10cm-0-1port-25PRB'
 
 num_samples = 600
 num_ports = 1
 num_subcarriers = 25 * 12
 
 step_samples = 10
-step_subcarriers = 60
+step_subcarriers = 12
 
 delta_t = 1e-2 * step_samples
 wave_freq = 915e6 + 15e3 * (np.arange(0, num_subcarriers, step_subcarriers) - num_subcarriers / 2)
 sep_length = 0.19
+size = 20
 
 P = np.fromfile(
-    '/home/stmharry/Library/srsLTE/build/signal-kinetics/log/{:s}'.format(name),
+    '/home/stmharry/Library/srsLTE/build/signal-kinetics/{:s}'.format(name),
     dtype=np.float32,
 )
 P = P[:num_samples * num_ports * num_subcarriers]
@@ -49,66 +55,90 @@ host = Particles(
 
 particles = Particles(
     world=world,
-    num_particles=10000,
-    communism_ratio=0.30,
+    num_particles=100000,
+    smooth_ratio=0.25,
     r=host.r,
-    r_std=5.0,
-    v=(0.0, 0.0),
-    v_std=0.5,
+    r_std=size,
 )
 
 
-map_size = 5.0
+map_size = size
 num_bins = 512
 power = 0.3
-local_size = 1.0
+local_size = 3.0
 local_bins = int(local_size / map_size * num_bins)
-
-fig = plot.figure(figsize=(12, 6))
-
-ax = fig.add_subplot(1, 2, 1)
-ax.plot(host.r[0, 0], host.r[0, 1], 'ro')
-
-(est_line,) = ax.plot(0, 0, 'bo')
-
 xedges = np.linspace(-map_size, map_size, num_bins)
 yedges = np.linspace(-map_size, map_size, num_bins)
-(hist, _, _) = np.histogram2d(particles.r[:, 0], particles.r[:, 1], bins=[xedges, yedges])
 
-img = ax.imshow(np.power(hist.T, power), extent=[-map_size, map_size, -map_size, map_size], origin='lower', cmap='binary')
+#
+
+map_fig = plot.figure(figsize=(6, 6))
+
+ax = map_fig.add_axes([0.15, 0.1, 0.8, 0.8])
+(host_line,) = ax.plot(host.r[0, 0], host.r[0, 1], 'ks')
+
+est_line = ax.scatter([], [], c='k')
+ax.legend(
+    [host_line, est_line],
+    ['TX', 'RX modes'],
+    loc='upper center',
+    bbox_to_anchor=(0.5, 1.125),
+    ncol=2,
+)
+(hist, _, _) = np.histogram2d(particles.r[:, 0], particles.r[:, 1], bins=[xedges, yedges])
+img = ax.imshow(
+    np.power(hist.T / np.max(hist), power),
+    extent=np.array([-map_size, map_size, -map_size, map_size]) - map_size / num_bins,
+    origin='lower',
+    cmap='binary',
+)
 
 ax.set_xlim(-map_size, map_size)
 ax.set_ylim(-map_size, map_size)
 
-ax.set_xlabel('x (m)')
-ax.set_ylabel('y (m)')
+ax.set_xlabel('$x$ (m)')
+ax.set_ylabel('$y$ (m)')
 
-ax = fig.add_subplot(1, 2, 2)
-(phase_line,) = ax.plot([], [], 'b')
+#
+
+phase_fig = plot.figure(figsize=(6, 6))
+
+ax = phase_fig.add_axes([0.15, 0.1, 0.8, 0.8])
+(phase_line,) = ax.plot([], [], 'k')
+ax.legend(
+    [phase_line],
+    ['915 MHz'],
+    loc='upper center',
+    bbox_to_anchor=(0.5, 1.125),
+)
+
+ax.grid(True, linestyle=':')
 
 ax.set_xlim(0, num_samples / step_samples * delta_t)
 ax.set_ylim(-np.pi, np.pi)
 
-ax.set_xlabel('Time (s)')
-ax.set_ylabel('Phase (radian)')
+ax.set_xlabel('$t$ (s)')
+ax.set_ylabel('$\phi$ (radian)')
 
 plot.show(block=False)
-fig.canvas.draw()
 
 for n in range(num_samples / step_samples):
-    print('Time={:.4f} s'.format(n * delta_t))
+    t = n * delta_t
+    v = +0.1
+
+    print('Time={:.4f} s'.format(t))
 
     particles.predict(
         host=host,
         r_std=None,
-        v=(0.1, 0.0),
+        v=(v, 0.0),
         v_std=0.05,
     )
     particles.update(
         host=host,
         phase=P[n],
-        phase_spread=0.5,
-        r_spread=10.0,
+        phase_spread=1.0,
+        r_spread=size,
     )
     particles.resample()
 
@@ -118,13 +148,17 @@ for n in range(num_samples / step_samples):
         hist == scipy.ndimage.filters.maximum_filter(hist, size=local_bins),
     ]))
 
-    est_line.set_data(xedges[xs], yedges[ys])
-    img.set_data(np.power(hist.T, power))
+    est_line.set_offsets(np.stack([xedges[xs], yedges[ys]], axis=1))
+    est_line.set_sizes(hist[xs, ys] / np.max(hist) * 30)
+    img.set_data(np.power(hist.T / np.max(hist), power))
     img.autoscale()
 
     phase_line.set_data(np.arange(n) * delta_t, P[:n, 0])
 
-    fig.canvas.draw()
-    fig.canvas.flush_events()
+    for fig in [map_fig, phase_fig]:
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+
+    # raw_input()
 
 plot.show(block=True)
