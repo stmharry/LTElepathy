@@ -7,7 +7,6 @@ import asyncore
 import matplotlib.pyplot as plot
 import numpy as np
 import scipy.ndimage
-import signal
 import socket
 import threading
 import time
@@ -51,7 +50,7 @@ class Device(object):
         if string and (string[0] == '$'):
             is_valid = True
             count = ord(string[2])
-            value = np.frombuffer(string[3:-2], dtype=self.dtype)
+            value = np.frombuffer(string[3:-2], dtype=self.dtype).astype(np.float32)
 
             with self.lock:
                 self.is_valid = is_valid
@@ -83,7 +82,31 @@ class Server(asyncore.dispatcher):
         self.thread.start()
 
 
-class Manager(object):
+class Scheduled(threading.Thread):
+    def __init__(self, delta_t):
+        super(Scheduled, self).__init__()
+        self.daemon = True
+
+        self.delta_t = delta_t
+
+    def _run(self):
+        pass
+
+    def run(self):
+        at = time.time()
+        while True:
+            self._run()
+
+            at += self.delta_t
+            sleep = at - time.time()
+            if (sleep < 0):
+                print('Overtime by {:.3f} seconds'.format(-sleep))
+                at = time.time()
+            else:
+                time.sleep(sleep)
+
+
+class Manager(Scheduled):
     class ID:
         Arduino = 0
         ArduinoDebug = 1
@@ -91,14 +114,16 @@ class Manager(object):
 
     Devices = {
         ID.Arduino: Device('Arduino', dtype=np.dtype('int16').newbyteorder('<')),
-        ID.ArduinoDebug: Device('ArduinoDebug', dtype=np.dtype('int16').newbyteorder('<')),
+        # ID.ArduinoDebug: Device('ArduinoDebug', dtype=np.dtype('int16').newbyteorder('<')),
         ID.UE: Device('UE', dtype=np.dtype('float32')),
     }
 
     def __init__(self, delta_t):
-        self.delta_t = delta_t
+        super(Manager, self).__init__(delta_t=delta_t)
+
         self.step = 0
         self.phases = []
+        self.as_ = []
 
     def _run(self):
         valid = True
@@ -124,72 +149,70 @@ class Manager(object):
             a = (values[Manager.ID.Arduino][:2] / 16384) * 9.81
             phase = values[Manager.ID.UE]
 
-            particles.predict(
-                host=host,
-                r_std=None,
-                a=a,
-                a_std=0.001,
-            )
-            particles.update(
-                host=host,
-                phase=phase,
-                phase_spread=1.0,
-                r_spread=size,
-            )
-            particles.resample()
-
-            (hist, _, _) = np.histogram2d(particles.r[:, 0], particles.r[:, 1], bins=[xedges, yedges])
-            (xs, ys) = np.where(np.logical_and.reduce([
-                hist != 0,
-                hist == scipy.ndimage.filters.maximum_filter(hist, size=local_bins),
-            ]))
-
-            est_line.set_offsets(np.stack([xedges[xs], yedges[ys]], axis=1))
-            est_line.set_sizes(hist[xs, ys] / np.max(hist) * 30)
-            img.set_data(np.power(hist.T / np.max(hist), power))
-            img.autoscale()
-
-            phase_line.set_data(np.arange(self.step) * delta_t, self.phases)
-            x_max_step = self.step
-            x_min_step = max(0, x_max_step - 500)
-            phase_fig.axes[0].set_xlim(x_min_step * self.delta_t, x_max_step * self.delta_t)
-
-            for fig in [map_fig, phase_fig]:
-                fig.canvas.draw()
-                fig.canvas.flush_events()
-
             self.step += 1
             self.phases.append(phase[0])
+            self.as_.append(a)
 
-    def run(self):
-        at = time.time()
-        while True:
-            self._run()
+            if self.step > 10.0 / self.delta_t:
+                with lock:
+                    particles.predict(
+                        host=host,
+                        r_std=None,
+                        a=a,
+                        a_std=0.1,
+                    )
+                    particles.update(
+                        host=host,
+                        phase=phase,
+                        phase_spread=1.0,
+                        r_spread=size,
+                    )
+                    particles.resample()
 
-            at += self.delta_t
-            sleep = at - time.time()
-            if (sleep < 0):
-                print('Overtime by {:.3f} seconds'.format(-sleep))
-                at = time.time()
-            else:
-                time.sleep(sleep)
 
-    def start(self):
-        self.thread = threading.Thread(target=self.run)
-        self.thread.daemon = True
-        self.thread.start()
+class Artist(Scheduled):
+    def _run(self):
+        with lock:
+            (hist, _, _) = np.histogram2d(particles.r[:, 0], particles.r[:, 1], bins=[xedges, yedges])
+
+        (xs, ys) = np.where(np.logical_and.reduce([
+            hist != 0,
+            hist == scipy.ndimage.filters.maximum_filter(hist, size=local_bins),
+        ]))
+
+        est_line.set_offsets(np.stack([xedges[xs], yedges[ys]], axis=1))
+        est_line.set_sizes(hist[xs, ys] / np.max(hist) * 30)
+        img.set_data(np.power(hist.T / np.max(hist), power))
+        img.autoscale()
+
+        x_max_step = manager.step
+        x_min_step = max(0, x_max_step - int(5.0 / manager.delta_t))
+        xdata = np.arange(x_min_step, x_max_step) * manager.delta_t
+
+        phase_line.set_data(xdata, manager.phases[x_min_step:x_max_step])
+        as_ = zip(*manager.as_[x_min_step:x_max_step])
+        for (acc_line, a) in zip(acc_lines, as_):
+            acc_line.set_data(xdata, a)
+
+        for ax in info_fig.axes:
+            ax.set_xlim(x_min_step * manager.delta_t, x_max_step * manager.delta_t)
+
+        for fig in [map_fig, info_fig]:
+            fig.canvas.draw()
+            fig.canvas.flush_events()
+
 
 ################################################################################
 
 
 if __name__ == '__main__':
-    num_subcarriers = 50 * 12
+    num_subcarriers = 25 * 12
     step_subcarriers = 12
 
-    delta_t = 0.1
+    delta_t = 0.01
     wave_freq = 915e6 + 15e3 * (np.arange(0, num_subcarriers, step_subcarriers) - num_subcarriers / 2)
     sep_length = 0.19
-    size = 20
+    size = 5.0
 
     world = World(
         delta_t=delta_t,
@@ -209,13 +232,14 @@ if __name__ == '__main__':
         r=host.r,
         r_std=size,
         v=(0.0, 0.0),
-        v_std=0.05,
+        v_std=0.01,
     )
+    lock = threading.Lock()
 
     map_size = size
-    num_bins = 512
+    num_bins = 256
     power = 0.3
-    local_size = 3.0
+    local_size = 1.0
     local_bins = int(local_size / map_size * num_bins)
     xedges = np.linspace(-map_size, map_size, num_bins)
     yedges = np.linspace(-map_size, map_size, num_bins)
@@ -249,15 +273,11 @@ if __name__ == '__main__':
     ax.set_xlabel('$x$ (m)')
     ax.set_ylabel('$y$ (m)')
 
-    plot.show(block=False)
-    map_fig.canvas.draw()
-    map_fig.canvas.flush_events()
-
     #
 
-    phase_fig = plot.figure(figsize=(6, 6))
+    info_fig = plot.figure(figsize=(12, 6))
 
-    ax = phase_fig.add_axes([0.15, 0.1, 0.8, 0.8])
+    ax = info_fig.add_axes([0.1, 0.1, 0.35, 0.8])
     (phase_line,) = ax.plot([], [], 'k')
     ax.legend(
         [phase_line],
@@ -272,16 +292,29 @@ if __name__ == '__main__':
     ax.set_xlabel('$t$ (s)')
     ax.set_ylabel('$\phi$ (radian)')
 
+    ax = info_fig.add_axes([0.6, 0.1, 0.35, 0.8])
+    acc_lines = ax.plot(np.zeros((0, 3)), np.zeros((0, 3)))
+    ax.legend(
+        acc_lines,
+        ['$a_x$', '$a_y$', '$a_z$'],
+        ncol=3,
+        loc='upper center',
+        bbox_to_anchor=(0.5, 1.125),
+    )
+
+    ax.grid(True, linestyle=':')
+    ax.set_xlabel('$t$ (s)')
+    ax.set_ylabel('Acceleration (m/s$^2$)')
+
     plot.show(block=False)
-    phase_fig.canvas.draw()
-    phase_fig.canvas.flush_events()
 
     #
 
     server = Server('0.0.0.0', 6006)
     server.start()
 
-    manager = Manager(delta_t=0.1)
-    manager.run()
+    manager = Manager(delta_t=delta_t)
+    manager.start()
 
-    signal.pause()
+    artist = Artist(delta_t=0.5)
+    artist.run()
